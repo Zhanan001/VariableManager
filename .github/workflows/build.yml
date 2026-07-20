@@ -1,0 +1,37 @@
+name: Build Jar - Artifact
+
+on:
+  push:
+    branches: ["main", "master"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # 临时兼容旧 Action 的情况下可在需要时加：
+      # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Detect build system and build
+        id: build
+        run: |
+          set -e
+          ARTIFACT=""
+          if [ -f pom.xml ]; then
+            echo "Detected Maven project (pom.xml)"
+            mvn -B -DskipTests package
+            ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+          elif [ -f gradlew ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; then](#)
+
