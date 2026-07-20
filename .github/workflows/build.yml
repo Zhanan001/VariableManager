@@ -1,4 +1,4 @@
-name: Build Jar - Artifact
+name: Android Build (assemble + artifacts)
 
 on:
   push:
@@ -9,29 +9,43 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # 临时允许使用已弃用的 Node 20 以兼容旧 Action（仅在确实需要时启用）
+      # 临时兼容旧 Action（如无必要可删除）
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up Java 8
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '8'
 
-      - name: Install local libs to local maven repo (if any)
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-cache-${{ runner.os }}-${{ hashFiles('**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-cache-${{ runner.os }}-
+
+      - name: Ensure gradlew is executable
+        run: |
+          if [ -f ./gradlew ]; then chmod +x ./gradlew; fi
+
+      - name: Install optional local libs (libs/*.jar) to local maven repo
         run: |
           set -e
+          echo "=== Installing local libs (if any) ===" > build.log 2>&1 || true
           if [ -d libs ]; then
-            echo "Found libs/ directory — installing jars to local maven repo" | tee -a build.log || true
             for f in libs/*.jar; do
               if [ -f "$f" ]; then
-                echo "Installing $f to local maven repo" | tee -a build.log || true
+                echo "Install $f" | tee -a build.log
                 mvn org.apache.maven.plugins:maven-install-plugin:3.1.0:install-file \
                   -Dfile="$f" \
                   -DgroupId=local.libs \
@@ -41,66 +55,68 @@ jobs:
               fi
             done
           else
-            echo "No libs/ directory found, skipping local installs" | tee -a build.log || true
+            echo "No libs/ directory found" | tee -a build.log
           fi
 
-      - name: Build (Maven/Gradle auto-detect)
-        id: run_build
-        run: |
-          set -e
-          # start/overwrite build log
-          echo "=== Build log for run $GITHUB_SHA ===" > build.log
-          echo "" >> build.log
-
-          echo "Java version:" >> build.log
-          java -version >> build.log 2>&1 || true
-
-          echo "Maven version:" >> build.log
-          mvn -v >> build.log 2>&1 || true
-
-          ART=""
-
-          if [ -f pom.xml ]; then
-            echo "Detected Maven project (pom.xml)" | tee -a build.log
-            mvn -B -DskipTests package >> build.log 2>&1
-            ART=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
-          elif [ -f gradlew ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; then
-            echo "Detected Gradle project" | tee -a build.log
-            if [ -f gradlew ]; then
-              chmod +x ./gradlew
-              ./gradlew build -x test >> build.log 2>&1
+      - name: Install Android SDK & build with Gradle (uses emulator-runner to setup SDK)
+        id: android_build
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 26
+          arch: x86_64
+          target: default
+          force-avd-creation: false
+          emulator-options: "-no-window -no-audio"
+          script: |
+            set -e
+            echo "=== Gradle build start ===" >> build.log 2>&1
+            if [ -f ./gradlew ]; then
+              ./gradlew assembleRelease -x test >> build.log 2>&1 || BUILD_FAILED=1
+              ./gradlew assembleDebug -x test >> build.log 2>&1 || true
             else
-              gradle build -x test >> build.log 2>&1
+              gradle assembleRelease -x test >> build.log 2>&1 || BUILD_FAILED=1
+              gradle assembleDebug -x test >> build.log 2>&1 || true
             fi
-            ART=$(ls build/libs/*.jar 2>/dev/null | head -n 1 || true)
+
+            # collect apk path (first match)
+            APK=$(find app/build/outputs -type f -name "*.apk" | head -n 1 || true)
+            if [ -n "$APK" ]; then
+              echo "apk=$APK" >> $GITHUB_OUTPUT
+            else
+              echo "apk=" >> $GITHUB_OUTPUT
+            fi
+
+            if [ ! -z "$BUILD_FAILED" ]; then
+              echo "GRADLE_BUILD_FAILED=1" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+
+      - name: Print build.log (for debugging)
+        if: always()
+        run: |
+          echo "==== BEGIN build.log ===="
+          if [ -f build.log ]; then
+            sed -n '1,2000p' build.log || true
           else
-            echo "No pom.xml or Gradle build files found — attempting Maven package by default" | tee -a build.log
-            mvn -B -DskipTests package >> build.log 2>&1
-            ART=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+            echo "build.log not found"
           fi
+          echo "==== END build.log ===="
 
-          echo "" >> build.log
-          echo "==== directory listings ====" >> build.log
-          ls -la target 2>/dev/null >> build.log 2>&1 || true
-          ls -la build/libs 2>/dev/null >> build.log 2>&1 || true
-          echo "============================" >> build.log
-
-          # export artifact info for downstream steps
-          echo "artifact=$ART" >> $GITHUB_OUTPUT
-          if [ -n "$ART" ]; then
-            echo "artifact_name=$(basename "$ART")" >> $GITHUB_OUTPUT
-          else
-            echo "artifact_name=" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Upload jar artifact (on success)
-        if: success() && steps.run_build.outputs.artifact != ''
+      - name: Upload APK artifact (if built)
+        if: success() && steps.android_build.outputs.apk != ''
         uses: actions/upload-artifact@v4
         with:
-          name: built-jar-${{ github.sha }}
-          path: ${{ steps.run_build.outputs.artifact }}
+          name: apk-${{ github.sha }}
+          path: ${{ steps.android_build.outputs.apk }}
 
-      - name: Upload build log (always)
+      - name: Upload all APKs (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks-all-${{ github.sha }}
+          path: app/build/outputs/**/*.apk
+
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
