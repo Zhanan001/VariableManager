@@ -8,9 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      # 临时兼容旧 Action 的情况下可在需要时加：
-      # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
 
     steps:
       - name: Checkout repository
@@ -22,16 +19,49 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
 
       - name: Detect build system and build
         id: build
         run: |
           set -e
           ARTIFACT=""
+
           if [ -f pom.xml ]; then
             echo "Detected Maven project (pom.xml)"
             mvn -B -DskipTests package
             ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
-          elif [ -f gradlew ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; then](#)
-
+          elif [ -f gradlew ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+            echo "Detected Gradle project"
+            if [ -f gradlew ]; then
+              chmod +x ./gradlew
+              ./gradlew build -x test
+            else
+              gradle build -x test
+            fi
+            ARTIFACT=$(ls build/libs/*.jar 2>/dev/null | head -n 1 || true)
+          else
+            echo "No pom.xml or Gradle build files found — attempting Maven package by default"
+            mvn -B -DskipTests package || true
+            ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+          fi
+
+          if [ -z "$ARTIFACT" ]; then
+            echo "No artifact produced by build. Listing directories for debugging:"
+            echo "---- target ----"
+            ls -la target || true
+            echo "---- build/libs ----"
+            ls -la build/libs || true
+            echo "Exiting with failure (no jar found)"
+            exit 1
+          fi
+
+          echo "Found artifact: $ARTIFACT"
+          echo "artifact=$ARTIFACT" >> $GITHUB_OUTPUT
+          echo "artifact_name=$(basename "$ARTIFACT")" >> $GITHUB_OUTPUT
+
+      - name: Upload build artifact for manual download
+        uses: actions/upload-artifact@v4
+        with:
+          name: variablemanager-${{ github.sha }}
+          path: ${{ steps.build.outputs.artifact }}
