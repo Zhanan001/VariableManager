@@ -9,7 +9,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      # 临时兼容旧 Action（仅在确实需要时启用）
+      # 临时允许使用已弃用的 Node 20 以兼容旧 Action（仅在确实需要时启用）
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
 
     steps:
@@ -24,70 +24,85 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install local libs to maven repo (if any)
+      - name: Install local libs to local maven repo (if any)
         run: |
           set -e
           if [ -d libs ]; then
-            echo "Found libs/ directory — installing any jars to local maven repository"
+            echo "Found libs/ directory — installing jars to local maven repo" | tee -a build.log || true
             for f in libs/*.jar; do
               if [ -f "$f" ]; then
-                echo "Installing $f to local maven repo"
+                echo "Installing $f to local maven repo" | tee -a build.log || true
                 mvn org.apache.maven.plugins:maven-install-plugin:3.1.0:install-file \
                   -Dfile="$f" \
                   -DgroupId=local.libs \
                   -DartifactId="$(basename "$f" .jar)" \
                   -Dversion=1.0 \
-                  -Dpackaging=jar || true
+                  -Dpackaging=jar >> build.log 2>&1 || true
               fi
             done
           else
-            echo "No libs/ directory found, skipping local installs"
+            echo "No libs/ directory found, skipping local installs" | tee -a build.log || true
           fi
 
-      - name: Detect build system and build (debug)
-        id: build
+      - name: Build (Maven/Gradle auto-detect)
+        id: run_build
         run: |
           set -e
-          echo ">>> Java and Maven info"
-          java -version || true
-          mvn -v || true
-          ARTIFACT=""
+          # start/overwrite build log
+          echo "=== Build log for run $GITHUB_SHA ===" > build.log
+          echo "" >> build.log
+
+          echo "Java version:" >> build.log
+          java -version >> build.log 2>&1 || true
+
+          echo "Maven version:" >> build.log
+          mvn -v >> build.log 2>&1 || true
+
+          ART=""
 
           if [ -f pom.xml ]; then
-            echo "Detected Maven project (pom.xml)"
-            mvn -B -DskipTests -e package
-            ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+            echo "Detected Maven project (pom.xml)" | tee -a build.log
+            mvn -B -DskipTests package >> build.log 2>&1
+            ART=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
           elif [ -f gradlew ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; then
-            echo "Detected Gradle project"
+            echo "Detected Gradle project" | tee -a build.log
             if [ -f gradlew ]; then
               chmod +x ./gradlew
-              ./gradlew build -x test
+              ./gradlew build -x test >> build.log 2>&1
             else
-              gradle build -x test
+              gradle build -x test >> build.log 2>&1
             fi
-            ARTIFACT=$(ls build/libs/*.jar 2>/dev/null | head -n 1 || true)
+            ART=$(ls build/libs/*.jar 2>/dev/null | head -n 1 || true)
           else
-            echo "No pom.xml or Gradle build files found — attempting Maven package by default"
-            mvn -B -DskipTests -e package || true
-            ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+            echo "No pom.xml or Gradle build files found — attempting Maven package by default" | tee -a build.log
+            mvn -B -DskipTests package >> build.log 2>&1
+            ART=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
           fi
 
-          echo "==== build output: listing artifact locations ===="
-          ls -la target 2>/dev/null || true
-          ls -la build/libs 2>/dev/null || true
-          echo "=============================================="
+          echo "" >> build.log
+          echo "==== directory listings ====" >> build.log
+          ls -la target 2>/dev/null >> build.log 2>&1 || true
+          ls -la build/libs 2>/dev/null >> build.log 2>&1 || true
+          echo "============================" >> build.log
 
-          if [ -z "$ARTIFACT" ]; then
-            echo "No artifact produced by build. Exiting with failure."
-            exit 1
+          # export artifact info for downstream steps
+          echo "artifact=$ART" >> $GITHUB_OUTPUT
+          if [ -n "$ART" ]; then
+            echo "artifact_name=$(basename "$ART")" >> $GITHUB_OUTPUT
+          else
+            echo "artifact_name=" >> $GITHUB_OUTPUT
           fi
 
-          echo "Found artifact: $ARTIFACT"
-          echo "artifact=$ARTIFACT" >> $GITHUB_OUTPUT
-          echo "artifact_name=$(basename "$ARTIFACT")" >> $GITHUB_OUTPUT
-
-      - name: Upload build artifact for manual download
+      - name: Upload jar artifact (on success)
+        if: success() && steps.run_build.outputs.artifact != ''
         uses: actions/upload-artifact@v4
         with:
-          name: variablemanager-${{ github.sha }}
-          path: ${{ steps.build.outputs.artifact }}
+          name: built-jar-${{ github.sha }}
+          path: ${{ steps.run_build.outputs.artifact }}
+
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.sha }}
+          path: build.log
