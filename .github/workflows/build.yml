@@ -8,8 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 临时允许使用已弃用的 Node 20（如果你之前遇到 Node 20 警告并需要兼容旧 Action，可启用；长期请移除）
     env:
+      # 临时兼容旧 Action（仅在确实需要时启用）
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
 
     steps:
@@ -35,7 +35,7 @@ jobs:
                 mvn org.apache.maven.plugins:maven-install-plugin:3.1.0:install-file \
                   -Dfile="$f" \
                   -DgroupId=local.libs \
-                  -DartifactId=$(basename "$f" .jar) \
+                  -DartifactId="$(basename "$f" .jar)" \
                   -Dversion=1.0 \
                   -Dpackaging=jar || true
               fi
@@ -44,10 +44,50 @@ jobs:
             echo "No libs/ directory found, skipping local installs"
           fi
 
-      - name: Detect build system and build (debuggable)
+      - name: Detect build system and build (debug)
         id: build
         run: |
           set -e
           echo ">>> Java and Maven info"
-          java -](#)
-
+          java -version || true
+          mvn -v || true
+          ARTIFACT=""
+
+          if [ -f pom.xml ]; then
+            echo "Detected Maven project (pom.xml)"
+            mvn -B -DskipTests -e package
+            ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+          elif [ -f gradlew ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+            echo "Detected Gradle project"
+            if [ -f gradlew ]; then
+              chmod +x ./gradlew
+              ./gradlew build -x test
+            else
+              gradle build -x test
+            fi
+            ARTIFACT=$(ls build/libs/*.jar 2>/dev/null | head -n 1 || true)
+          else
+            echo "No pom.xml or Gradle build files found — attempting Maven package by default"
+            mvn -B -DskipTests -e package || true
+            ARTIFACT=$(ls target/*.jar 2>/dev/null | head -n 1 || true)
+          fi
+
+          echo "==== build output: listing artifact locations ===="
+          ls -la target 2>/dev/null || true
+          ls -la build/libs 2>/dev/null || true
+          echo "=============================================="
+
+          if [ -z "$ARTIFACT" ]; then
+            echo "No artifact produced by build. Exiting with failure."
+            exit 1
+          fi
+
+          echo "Found artifact: $ARTIFACT"
+          echo "artifact=$ARTIFACT" >> $GITHUB_OUTPUT
+          echo "artifact_name=$(basename "$ARTIFACT")" >> $GITHUB_OUTPUT
+
+      - name: Upload build artifact for manual download
+        uses: actions/upload-artifact@v4
+        with:
+          name: variablemanager-${{ github.sha }}
+          path: ${{ steps.build.outputs.artifact }}
